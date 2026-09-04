@@ -1,0 +1,8 @@
+Rule-based baseline v1
+Rules (applied in order):
+  1. if is_high_value == True AND txn_deviation_from_customer_avg > 2000: ESCALATE (fraud=1)
+  2. elif is_high_value == True AND txn_deviation_from_customer_avg > 1000: HUMAN_REVIEW (fraud=0)
+  3. elif is_high_value == True: APPROVE (fraud=0)
+  4. else: APPROVE (fraud=0)
+Rules use only: is_high_value, txn_deviation_from_customer_avg
+No target-derived features. No test-set tuning.
