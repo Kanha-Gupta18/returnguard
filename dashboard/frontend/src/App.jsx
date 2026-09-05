@@ -1,422 +1,98 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 
-function App() {
-  // Form state with sensible default numeric values
-  const [TransactionAmt_raw, setTransactionAmt_raw] = useState(150.0)
-  const [hour_of_day, setHourOfDay] = useState(14)
-  const [day_of_week, setDayOfWeek] = useState(3)
-  const [is_high_value, setIsHighValue] = useState(0)
-  const [txn_deviation_from_customer_avg, setTxnDeviation] = useState(200.0)
-  const [V_V29, setVV29] = useState(0.0)
-  const [V_V37, setVV37] = useState(0.0)
-  const [V_V30, setVV30] = useState(0.0)
-  const [V_V35, setVV35] = useState(0.0)
+const defaults = { TransactionAmt_raw: '150', hour_of_day: '14', day_of_week: '3', txn_deviation_from_customer_avg: '200', V_V29: '0', V_V37: '0', V_V30: '0', V_V35: '0' }
+const labels = { TransactionAmt_raw: 'Transaction amount', TransactionAmt_log1p: 'Transaction amount (log)', txn_deviation_from_customer_avg: 'Deviation from customer average', hour_of_day: 'Hour of day', day_of_week: 'Day index', is_high_value: 'High-value transaction', R_emaildomain: 'Recipient email domain', P_emaildomain: 'Purchaser email domain' }
+const featureName = (name) => labels[name] || (/^card/.test(name) ? `Card attribute ${name.slice(4)}` : /^addr/.test(name) ? `Address attribute ${name.slice(4)}` : name)
+const number = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const actions = { APPROVE: 'Approve', HUMAN_REVIEW: 'Human review', ESCALATE: 'Escalate' }
 
-  // API state
-  const [prediction, setPrediction] = useState(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [apiError, setApiError] = useState(null)
-
-  // Analyze: POST form values to the FastAPI backend
-  const analyzeTransaction = async () => {
-    setIsLoading(true)
-    setApiError(null)
-    try {
-      const body = {
-        TransactionAmt_raw: Number(TransactionAmt_raw),
-        hour_of_day: Number(hour_of_day),
-        day_of_week: Number(day_of_week),
-        is_high_value: Number(is_high_value),
-        txn_deviation_from_customer_avg: Number(txn_deviation_from_customer_avg),
-        V_V29: Number(V_V29),
-        V_V37: Number(V_V37),
-        V_V30: Number(V_V30),
-        V_V35: Number(V_V35),
-      }
-      const res = await fetch('http://localhost:8000/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!res.ok) {
-        const errText = await res.text()
-        throw new Error('API error: ' + res.status + ' ' + errText)
-      }
-      const data = await res.json()
-      setPrediction(data)
-    } catch (e) {
-      setApiError(e.message || 'Unexpected error')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <header className="border-y border-gray-200 dark:border-gray-700">
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">
-            ReturnGuard
-          </h1>
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            AI-Powered Transaction Risk Decision System
-          </p>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto p-4">
-        <section className="mt-8">
-          <h2 className="text-xl font-medium text-gray-900 dark:text-gray-100 mb-4">
-            Transaction Analysis
-          </h2>
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
-            {/* Transaction amount field */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                Transaction Amount (raw)
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  ($)
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={TransactionAmt_raw}
-                onChange={(e) => setTransactionAmt_raw(Number(e.target.value) || 0.0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="150.00"
-                aria-label="Transaction amount in currency units"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Total transaction amount before log transformation
-              </p>
-            </div>
-
-            {/* Hour of day */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                Hour of Day
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  0-23
-                </span>
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="23"
-                value={hour_of_day}
-                onChange={(e) => setHourOfDay(Number(e.target.value) || 0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="14"
-                aria-label="Hour of day (0-23)"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Hour in 24-hour format (e.g., 14 = 2PM)
-              </p>
-            </div>
-
-            {/* Day of week */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                Day of Week
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  0-6
-                </span>
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="6"
-                value={day_of_week}
-                onChange={(e) => setDayOfWeek(Number(e.target.value) || 0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="3"
-                aria-label="Day of week (0=Sunday, 6=Saturday)"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
-              </p>
-            </div>
-
-            {/* Is high value */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                Is High Value
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  > 500
-                </span>
-              </label>
-              <input
-                type="number"
-                min="0"
-                max="1"
-                value={is_high_value}
-                onChange={(e) => setIsHighValue(Number(e.target.value) || 0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="0 or 1"
-                aria-label="Whether transaction is above $500 threshold"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Transaction amount > $500 (deterministic flag)
-              </p>
-            </div>
-
-            {/* Transaction deviation from customer avg */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                Deviation from Customer Avg
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  ($)
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={txn_deviation_from_customer_avg}
-                onChange={(e) =>
-                  setTxnDeviation(Number(e.target.value) || 0.0)
-                }
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="200.00"
-                aria-label="Transaction deviation from customer historical average"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Difference between transaction amount and customer's historical average
-              </p>
-            </div>
-
-            {/* V_V29 */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                V_V29
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  value
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={V_V29}
-                onChange={(e) => setVV29(Number(e.target.value) || 0.0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="0.00"
-                aria-label="V feature V_V29"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                V feature index 29 (enrichment feature)
-              </p>
-            </div>
-
-            {/* V_V37 */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                V_V37
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  value
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={V_V37}
-                onChange={(e) => setVV37(Number(e.target.value) || 0.0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="0.00"
-                aria-label="V feature V_V37"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                V feature index 37 (enrichment feature)
-              </p>
-            </div>
-
-            {/* V_V30 */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                V_V30
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  value
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={V_V30}
-                onChange={(e) => setVV30(Number(e.target.value) || 0.0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="0.00"
-                aria-label="V feature V_V30"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                V feature index 30 (enrichment feature)
-              </p>
-            </div>
-
-            {/* V_V35 */}
-            <div className="grid grid-cols-1 gap-4 mb-4">
-              <label className="text-sm text-gray-700 dark:text-gray-300 block">
-                V_V35
-                <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
-                  value
-                </span>
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={V_V35}
-                onChange={(e) => setVV35(Number(e.target.value) || 0.0)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 dark:focus:ring-blue-500 focus:border-blue-500"
-                placeholder="0.00"
-                aria-label="V feature V_V35"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                V feature index 35 (enrichment feature)
-              </p>
-            </div>
-          </div>
-        </section>
-
-        {/* Analyze button */}
-        <section className="mt-8">
-          <button
-            type="button"
-            className="w-full px-6 py-3 border border-blue-600 text-blue-600 rounded-md font-medium text-sm hover:bg-blue-50 dark:hover:bg-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-900"
-            onClick={analyzeTransaction}
-            disabled={isLoading}
-          >
-            {isLoading ? 'Analyzing...' : 'Analyze Transaction'}
-          </button>
-        </section>
-
-        {/* Risk Decision section */}
-        <section className="mt-8">
-          <h2 className="text-xl font-medium text-gray-900 dark:text-gray-100 mb-4">
-            Risk Decision
-          </h2>
-          {prediction ? (
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                    Risk Score
-                  </p>
-                  <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                    {(prediction.risk_score * 100).toFixed(1)}%
-                  </p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                    Risk Band
-                  </p>
-                  <p className="text-xl font-medium text-gray-900 dark:text-gray-100">
-                    {prediction.risk_band}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-4">
-                <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                  Recommended Action
-                </p>
-                <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
-                  {prediction.recommended_action}
-                </p>
-              </div>
-            </div>
-          ) : (prediction === null && !apiError ? (
-            <p className="text-gray-500 dark:text-gray-400 text-sm">
-              Prediction results will appear here after analysis
-            </p>
-          ) : (apiError ? (
-            <p className="text-red-600 dark:text-red-400 text-sm">
-              Error: {apiError}
-            </p>
-          ) : null)}</section>
-
-{/* Expected Costs section */}
-        <section className="mt-8">
-          <h2 className="text-xl font-medium text-gray-900 dark:text-gray-100 mb-4">
-            Expected Costs
-          </h2>
-          {prediction ? (
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                    Approve
-                  </p>
-                  <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
-                    {prediction.expected_costs.approve}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                    Review
-                  </p>
-                  <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
-                    {prediction.expected_costs.review}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                    Escalate
-                  </p>
-                  <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
-                    {prediction.expected_costs.escalate}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : (prediction === null && !apiError ? (
-            <p className="text-gray-500 dark:text-gray-400 text-sm">              Modelled expected costs will appear here after analysis
-            </p>
-          ) : (apiError ? (
-            <p className="text-red-600 dark:text-red-400 text-sm">              Error: {apiError}
-            </p>
-          ) : null)}</section>
-
-{/* Why This Decision? section */}
-        <section className="mt-8">
-          <h2 className="text-xl font-medium text-gray-900 dark:text-gray-100 mb-4">
-            Why This Decision?
-          </h2>
-          {prediction ? (
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
-              <div className="grid grid-cols-2 gap-4">
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Top Risk Factors</h3>
-                <ul className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
-                  {prediction.top_risk_factors.map((factor, idx) => (
-                    <li key={idx}>
-                      <span className="font-medium">{factor.feature}</span>: {factor.contribution > 0 ? '+' + factor.contribution : factor.contribution}{factor.description ? \". \" + factor.description : ''}
-                    </li>
-                  ))}
-                </ul>
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Protective Factors</h3>
-                <ul className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
-                  {prediction.top_protective_factors.map((factor, idx) => (
-                    <li key={idx}>
-                      <span className="font-medium">{factor.feature}</span>: {factor.contribution > 0 ? '+' + factor.contribution : factor.contribution}{factor.description ? \". \" + factor.description : ''}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ) : (prediction === null && !apiError ? (
-            <p className="text-gray-500 dark:text-gray-400 text-sm">              Risk and protective factors will appear here after analysis
-            </p>
-          ) : (apiError ? (
-            <p className="text-red-600 dark:text-red-400 text-sm">              Error: {apiError}
-            </p>
-          ) : null)}</section>
-      </main>
-
-      <footer className="mt-8 border-t border-gray-200 dark:border-gray-700 pt-8">
-        <div className="max-w-7xl mx-auto px-4">
-          <p className="text-center text-xs text-gray-500 dark:text-gray-400">
-            AI recommends. Human investigators make final decisions.
-          </p>
-        </div>
-      </footer>
-    </div>
-  )
+function Factors({ title, factors, protective = false }) {
+  return <section className="factors"><h3>{title}</h3>
+    {factors.length ? <ul>{[...factors].sort((a, b) => b.contribution - a.contribution).map(factor => <li key={factor.feature}>
+      <span title={factor.feature}>{featureName(factor.feature)}</span>
+      <strong className={protective ? 'protective' : 'risk'}>{protective ? '−' : '+'}{(factor.contribution * 100).toFixed(2)} pp</strong>
+    </li>)}</ul> : <p className="muted">No {protective ? 'protective' : 'risk'} factors returned for this transaction.</p>}
+  </section>
 }
 
-export default App
+export default function App() {
+  const [form, setForm] = useState(defaults)
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [submitted, setSubmitted] = useState('')
+  const changed = result && submitted !== JSON.stringify(form)
+
+  function field(name, label, options = {}) {
+    return <label className="field" key={name} htmlFor={name}><span>{label}</span>
+      <input id={name} type="number" required step="any" {...options} value={form[name]} onChange={event => setForm({ ...form, [name]: event.target.value })} />
+    </label>
+  }
+
+  async function analyze(event) {
+    event.preventDefault()
+    const payload = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, Number(value)]))
+    if (Object.values(payload).some(value => !Number.isFinite(value))) {
+      setError('Enter a valid number in every field.'); return
+    }
+    payload.TransactionAmt_log1p = Math.log1p(payload.TransactionAmt_raw)
+    payload.is_high_value = payload.TransactionAmt_raw > 500 ? 1 : 0
+    setLoading(true); setError(''); setResult(null)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 30000)
+    try {
+      const response = await fetch('/api/predict', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal })
+      if (!response.ok) throw new Error(`Analysis failed (HTTP ${response.status}). Check that the backend is running on port 8000, then try again.`)
+      const data = await response.json()
+      if (!Number.isFinite(data.risk_score) || !data.expected_costs || !Array.isArray(data.top_risk_factors) || !Array.isArray(data.top_protective_factors)) throw new Error('The API returned an incomplete result. Check the backend and try again.')
+      setResult(data); setSubmitted(JSON.stringify(form))
+    } catch (err) {
+      setError(err.name === 'AbortError' ? 'Analysis timed out. Check the backend and try again.' : err instanceof TypeError ? 'Cannot reach the API. Start the backend on port 8000 and try again.' : err.message)
+    } finally { clearTimeout(timeout); setLoading(false) }
+  }
+
+  return <div className="app">
+    <header className="brand-header"><div className="brand"><svg className="brand-mark" viewBox="0 0 40 44" fill="none" aria-hidden="true"><path d="M20 3 35 9v12c0 9-6 15-15 20C11 36 5 30 5 21V9L20 3Z" stroke="currentColor" strokeWidth="2.5"/><path d="m12 22 5 5 11-12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg><div><h1>ReturnGuard</h1><p>AI-Powered Transaction Risk Decision System</p></div></div><p className="oversight">AI recommends.<br/><strong>People make the final decision.</strong></p></header>
+    <main>
+      <section className="panel inputs" aria-labelledby="transaction-title">
+        <h2 id="transaction-title">Transaction Analysis</h2>
+        <p className="intro">Review the sample inputs, then analyze the transaction.</p>
+        <form onSubmit={analyze}>
+          <fieldset disabled={loading}>
+            {field('TransactionAmt_raw', 'Transaction amount (currency units)', { min: 0, step: '0.01' })}
+            <p className="derived">High value: <strong>{Number(form.TransactionAmt_raw) > 500 ? 'Yes' : 'No'}</strong> · Automatically set when amount is above 500.</p>
+            <div className="field-grid">
+              {field('hour_of_day', 'Hour of day (0–23)', { min: 0, max: 23, step: 1 })}
+              {field('day_of_week', 'Day index (0–6)', { min: 0, max: 6, step: 1 })}
+            </div>
+            {field('txn_deviation_from_customer_avg', 'Deviation from customer average', { step: '0.01' })}
+            <p className="hint">Amount minus the customer’s historical average, in currency units.</p>
+            <details><summary>Additional model inputs</summary><p className="hint">Anonymized transaction signals. Other omitted API features use the existing zero defaults.</p>
+              <div className="field-grid">{['V_V29', 'V_V37', 'V_V30', 'V_V35'].map(name => field(name, name))}</div>
+            </details>
+            <button type="submit">{loading ? 'Analyzing transaction…' : 'Analyze Transaction'}</button>
+          </fieldset>
+        </form>
+        <p className="hint api-note">Analysis uses the live local prediction API.</p>
+        {error && <p className="error" role="alert">{error}</p>}
+      </section>
+      <section className="panel results" aria-labelledby="result-title" aria-live="polite" aria-busy={loading}>
+        <h2 id="result-title">Risk Decision</h2>
+        {!result ? <div className="empty"><h3>{loading ? 'Analyzing your transaction…' : error ? 'Analysis unavailable' : 'Ready to analyze'}</h3><p>{loading ? 'Calculating risk, expected costs and contributing factors.' : error ? 'Your inputs are preserved. Resolve the connection issue and select Analyze Transaction to retry.' : 'Select Analyze Transaction to see the risk score, recommended action and explanation here.'}</p></div> : <>
+          <p className="result-context">Analyzed amount: {number(result.transaction_amount)} currency units</p>
+          {changed && <p className="stale" role="status">Inputs changed. Analyze again to update this result.</p>}
+          <div className="decision">
+            <div><span className="muted">Risk score</span><div className="score">{(result.risk_score * 100).toFixed(2)}<span>%</span></div><span className={`band ${result.risk_band.toLowerCase()}`}>{result.risk_band} RISK</span></div>
+            <div><span className="muted">Recommended action</span><h3 className="action">{actions[result.recommended_action] || result.recommended_action}</h3><p className="hint">{result.recommended_action === 'HUMAN_REVIEW' ? 'Route to an investigator for review.' : result.recommended_action === 'ESCALATE' ? 'Escalate for further investigation.' : 'Approval recommended for human consideration.'}</p></div>
+          </div>
+          <section className="costs"><h3>Expected Costs</h3><p className="hint">Modeled loss in currency units for each action.</p>
+            <dl>{Object.entries(result.expected_costs).map(([action, cost]) => <div key={action} className={action === ({ APPROVE: 'approve', HUMAN_REVIEW: 'review', ESCALATE: 'escalate' }[result.recommended_action]) ? 'recommended-cost' : ''}><dt>{action === 'review' ? 'Human review' : action === 'approve' ? 'Approve' : 'Escalate'}</dt><dd>{number(cost)}</dd></div>)}</dl>
+          </section>
+          <div className="factor-grid"><Factors title="Top risk factors" factors={result.top_risk_factors} /><Factors title="Top protective factors" factors={result.top_protective_factors} protective /></div>
+          <p className="hint">Factor impacts show probability changes in percentage points (pp) relative to the explainer’s reference values; they are not additive.</p>
+        </>}
+      </section>
+    </main>
+    <footer>AI recommends. Human investigators make final decisions.</footer>
+  </div>
+}
