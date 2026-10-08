@@ -1,292 +1,163 @@
-"""Explainability layer for the ReturnGuard fraud detection model.
+"""Perturbation-based explanations for the ReturnGuard model.
 
-Provides transaction-level explanations using perturbation-based feature attribution
-via the trained XGBoost model at models/xgboost.joblib.
-
-Does NOT retrain anything.
-Does NOT claim causality.
-Explanations are derived from model prediction changes, not SHAP values.
-
-The public API consists of:
-- explain_transaction(fraud_prob, transaction_data) -> explanation dict
-- explain_with_descriptions(transaction_data) -> enriched explanation dict
-- describe_feature(feature_name) -> human-readable description
+The explainer is pure at runtime: the API owns artifact loading and passes the
+model, feature order, and training-reference medians into these functions.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Mapping, Sequence
 
-import joblib
 import numpy as np
 import pandas as pd
 
-from api.settings import EXPLANATION_REFERENCE_PATH, MODEL_PATH
-
-from explainability.feature_descriptions import get_description, describe_feature
-
-# Load the existing XGBoost model artifact
-_ARTIFACT_PATH = MODEL_PATH
-_artifact = joblib.load(_ARTIFACT_PATH)
-_clf = _artifact["model"]
-
-# Model feature columns (excluding customer_id which is an identifier)
-_all_feature_cols = [c for c in _artifact["feature_cols"] if c != "customer_id"]
-_N_FEATURES = len(_all_feature_cols)
-
-# ------------------------------------------------------------------
-# Reference values are derived once from the training split and shipped with the
-# inference artifact. Runtime prediction never requires the private/raw dataset.
-with EXPLANATION_REFERENCE_PATH.open(encoding="utf-8") as reference_file:
-    _reference_payload = json.load(reference_file)
-
-_reference_values = {
-    feature: float(value)
-    for feature, value in _reference_payload["medians"].items()
-}
-
-if set(_reference_values) != set(_all_feature_cols):
-    raise RuntimeError(
-        "Explanation reference features do not match the model artifact"
-    )
+from explainability.feature_descriptions import describe_feature, get_description
 
 
-# ------------------------------------------------------------------
-# Core explanation: perturbation-based feature contributions
-# ------------------------------------------------------------------
+def _resolve_context(
+    model: Any | None,
+    feature_cols: Sequence[str] | None,
+    reference_values: Mapping[str, float] | None,
+) -> tuple[Any, list[str], dict[str, float]]:
+    if model is not None and feature_cols is not None and reference_values is not None:
+        return model, list(feature_cols), dict(reference_values)
 
-def _prepare_transaction_row(transaction_data: dict | pd.DataFrame) -> np.ndarray:
-    """Convert a transaction dict/DataFrame into a numeric row array.
+    from api.inference import get_explanation_context
 
-    Only the features the model expects are kept; missing features default to 0.0.
-    Non-numeric values are coerced to 0.0 via pd.to_numeric.
-    """
+    return get_explanation_context()
+
+
+def _prepare_transaction_row(
+    transaction_data: dict[str, Any] | pd.DataFrame,
+    feature_cols: Sequence[str],
+) -> np.ndarray:
     if isinstance(transaction_data, dict):
-        row_dict = {c: transaction_data.get(c, 0.0) for c in _all_feature_cols}
+        row_dict = {name: transaction_data.get(name, 0.0) for name in feature_cols}
         row_df = pd.DataFrame([row_dict])
     elif isinstance(transaction_data, pd.DataFrame):
         row_df = pd.DataFrame(
-            {c: transaction_data.get(c, 0.0) for c in _all_feature_cols}, index=[0]
+            {name: transaction_data.get(name, 0.0) for name in feature_cols},
+            index=[0],
         )
     else:
-        raise TypeError("transaction_data must be a dict or pd.DataFrame")
+        raise TypeError("transaction_data must be a dict or pandas DataFrame")
 
-    # Coerce all values to numeric; non-numeric become NaN then 0.0
-    for c in _all_feature_cols:
-        row_df[c] = pd.to_numeric(row_df[c], errors="coerce")
-    row_df = row_df.fillna(0.0)
-
-    # Select only the columns the model expects, in the correct order, as a numpy array
-    row_array = row_df[_all_feature_cols].values.astype(float)
-    return row_array
+    for name in feature_cols:
+        row_df[name] = pd.to_numeric(row_df[name], errors="coerce")
+    return row_df[list(feature_cols)].fillna(0.0).to_numpy(dtype=float)
 
 
-def _model_predict(row_array: np.ndarray) -> float:
-    """Run the XGBoost model and return the predicted fraud probability."""
-    # The model's predict_proba returns shape (1, 2); take the probability of class 1.
-    prob = float(_clf.predict_proba(row_array)[:, 1][0])
-    return prob
+def _vectorized_contributions(
+    model: Any,
+    row_array: np.ndarray,
+    reference_array: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """Predict the original and every one-feature perturbation in one batch."""
+    feature_count = row_array.shape[1]
+    batch = np.repeat(row_array, feature_count + 1, axis=0)
+    feature_indexes = np.arange(feature_count)
+    batch[feature_indexes + 1, feature_indexes] = reference_array
+
+    probabilities = model.predict_proba(batch)[:, 1].astype(float)
+    original_probability = float(probabilities[0])
+
+    # Contribution is the original score minus the reference-perturbed score.
+    # Positive values therefore mean the observed feature increased risk.
+    contributions = original_probability - probabilities[1:]
+    return original_probability, contributions
 
 
 def explain_transaction(
     fraud_prob: float,
-    transaction_data: dict | pd.DataFrame,
+    transaction_data: dict[str, Any] | pd.DataFrame,
     *,
-    reference_values: Optional[Dict[str, float]] = None,
-) -> dict:
-    """Generate a perturbation-based explanation for a single transaction.
-
-    For each model feature, the feature is replaced with a reference value
-    (the median of the background training sample, or a user-supplied dict).
-    The model is re-predicted, and the change in fraud probability is recorded.
-
-    Features are then ranked by the absolute change in probability.
-
-    Parameters
-    ----------
-    fraud_prob : float
-        The XGBoost predicted probability of fraud in [0, 1].
-        Provided for context; the method recomputes the prediction from the
-        supplied transaction_data.
-    transaction_data : dict or pd.DataFrame
-        Feature values for the transaction. Keys should match the model's
-        expected feature names. Unknown keys are ignored; missing keys default
-        to the reference value.
-    reference_values : dict, optional
-        Mapping of feature name -> reference value. If None, the method uses
-        the median of the background training sample for each feature.
-
-    Returns
-    -------
-    dict with keys:
-        - risk_probability : float
-          The model's predicted fraud probability for the transaction.
-        - feature_name : str
-          The feature with the largest absolute contribution.
-        - feature_value : float
-          The original value of that feature in the transaction.
-        - shap_contribution : float
-          The absolute change in probability caused by perturbing that feature.
-        - direction : str
-          "INCREASED_RISK" if the perturbation increased the model's fraud
-          probability, "DECREASED_RISK" if it decreased it.
-        - positive_contributors : list[dict]
-          Top features whose perturbation increased the fraud probability.
-          Each dict has keys: feature, original_value, reference_value,
-          contribution, direction, description.
-        - negative_contributors : list[dict]
-          Top features whose perturbation decreased the fraud probability.
-          Same schema as positive_contributors.
-    """
-    # ------------------------------------------------------------------
-    # Validate inputs.
-    # ------------------------------------------------------------------
-    if not (0.0 <= fraud_prob <= 1.0):
+    model: Any | None = None,
+    feature_cols: Sequence[str] | None = None,
+    reference_values: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    if not 0.0 <= fraud_prob <= 1.0:
         raise ValueError("fraud_prob must be in [0, 1]")
 
-    # 1. Prepare the transaction row and compute the original prediction.
-    # ------------------------------------------------------------------
-    row_array = _prepare_transaction_row(transaction_data)
-    original_prob = _model_predict(row_array)
+    resolved_model, resolved_cols, resolved_refs = _resolve_context(
+        model,
+        feature_cols,
+        reference_values,
+    )
+    row_array = _prepare_transaction_row(transaction_data, resolved_cols)
+    reference_array = np.array(
+        [resolved_refs[name] for name in resolved_cols],
+        dtype=float,
+    )
+    original_probability, contribution_values = _vectorized_contributions(
+        resolved_model,
+        row_array,
+        reference_array,
+    )
 
-    # ------------------------------------------------------------------
-    # 2. Perturb each feature and record the change in probability.
-    # ------------------------------------------------------------------
-    contributions: List[Dict[str, Any]] = []
-
-    for idx, feature_name in enumerate(_all_feature_cols):
-        # Original value from the transaction
-        original_value = float(row_array[0, idx])
-
-        # Reference value to perturb to (median of background training sample,
-        # or user-supplied dict; falls back to module-level _reference_values).
-        ref_val = _reference_values.get(feature_name, 0.0) if reference_values is None else reference_values.get(feature_name, 0.0)
-
-        # Build a copy of the row where this single feature is replaced.
-        perturbed_row = row_array.copy()
-        perturbed_row[0, idx] = ref_val
-
-        perturbed_prob = _model_predict(perturbed_row)
-        contribution = perturbed_prob - original_prob  # positive => risk increased
-
-        # Human-readable description
-        description = get_description(feature_name)
-
+    contributions: list[dict[str, Any]] = []
+    for index, feature_name in enumerate(resolved_cols):
+        contribution = float(contribution_values[index])
         contributions.append(
             {
                 "feature": feature_name,
-                "original_value": original_value,
-                "reference_value": ref_val,
+                "original_value": float(row_array[0, index]),
+                "reference_value": float(reference_array[index]),
                 "contribution": contribution,
-                "direction": "INCREASED_RISK" if contribution > 0 else "DECREASED_RISK",
-                "description": description,
+                "direction": (
+                    "INCREASED_RISK" if contribution > 0 else "DECREASED_RISK"
+                ),
+                "description": get_description(feature_name),
             }
         )
 
-    # ------------------------------------------------------------------
-    # 3. Rank by absolute contribution and split into positive/negative.
-    # ------------------------------------------------------------------
-    # Sort by absolute contribution descending.
-    sorted_by_abs = sorted(contributions, key=lambda x: abs(x["contribution"]), reverse=True)
+    positive_contributors = sorted(
+        (item for item in contributions if item["contribution"] > 0),
+        key=lambda item: item["contribution"],
+        reverse=True,
+    )[:5]
+    negative_contributors = sorted(
+        (item for item in contributions if item["contribution"] < 0),
+        key=lambda item: abs(item["contribution"]),
+        reverse=True,
+    )[:5]
 
-    # Top features whose perturbation increased risk (positive contribution).
-    positive_contributors = sorted_by_abs[:5]  # top up to 5
-    # Sort positive contributors by contribution descending (most risk-increasing first).
-    positive_contributors.sort(key=lambda x: x["contribution"], reverse=True)
-
-    # Top features whose perturbation decreased risk (negative contribution).
-    negative_contributors = sorted_by_abs[5:10]  # next up to 5
-    # Sort negative contributors by contribution descending (closest to 0 first).
-    # For negative values: -0.05 > -0.15, so descending puts closest-to-0 first.
-    negative_contributors.sort(key=lambda x: x["contribution"], reverse=True)
-
-    # ------------------------------------------------------------------
-    # 4. Determine overall direction based on summed contributions.
-    # ------------------------------------------------------------------
-    total_pos = sum(c["contribution"] for c in positive_contributors)
-    total_neg = sum(abs(c["contribution"]) for c in negative_contributors)
-
-    if total_pos > total_neg:
+    total_positive = sum(item["contribution"] for item in positive_contributors)
+    total_negative = sum(abs(item["contribution"]) for item in negative_contributors)
+    if total_positive > total_negative:
         overall_direction = "INCREASED_RISK"
-    elif total_neg > total_pos:
+    elif total_negative > total_positive:
         overall_direction = "DECREASED_RISK"
     else:
         overall_direction = "UNKNOWN"
 
-    # ------------------------------------------------------------------
-    # 5. Return the structured explanation.
-    # ------------------------------------------------------------------
-    result: Dict[str, Any] = {
-        "risk_probability": float(fraud_prob),
-        "feature_name": "",
-        "feature_value": None,
-        "shap_contribution": 0.0,
+    ranked = sorted(
+        contributions,
+        key=lambda item: abs(item["contribution"]),
+        reverse=True,
+    )
+    top = ranked[0] if ranked else None
+
+    return {
+        "risk_probability": original_probability,
+        "feature_name": top["feature"] if top else "",
+        "feature_value": top["original_value"] if top else None,
+        "shap_contribution": abs(top["contribution"]) if top else 0.0,
         "direction": overall_direction,
-        "positive_contributors": [
-            {
-                "feature": c["feature"],
-                "original_value": c["original_value"],
-                "reference_value": c["reference_value"],
-                "contribution": c["contribution"],
-                "direction": c["direction"],
-                "description": c["description"],
-            }
-            for c in positive_contributors
-        ],
-        "negative_contributors": [
-            {
-                "feature": c["feature"],
-                "original_value": c["original_value"],
-                "reference_value": c["reference_value"],
-                "contribution": c["contribution"],
-                "direction": c["direction"],
-                "description": c["description"],
-            }
-            for c in negative_contributors
-        ],
+        "positive_contributors": positive_contributors,
+        "negative_contributors": negative_contributors,
     }
-
-    # Set the top single feature for convenience.
-    if positive_contributors:
-        result["feature_name"] = positive_contributors[0]["feature"]
-        result["feature_value"] = positive_contributors[0]["original_value"]
-        result["shap_contribution"] = positive_contributors[0]["contribution"]
-    elif negative_contributors:
-        result["feature_name"] = negative_contributors[0]["feature"]
-        result["feature_value"] = negative_contributors[0]["original_value"]
-        result["shap_contribution"] = negative_contributors[0]["contribution"]
-    else:
-        result["feature_name"] = ""
-        result["feature_value"] = None
-        result["shap_contribution"] = 0.0
-
-    return result
 
 
 def explain_with_descriptions(
-    transaction_data: dict | pd.DataFrame,
+    transaction_data: dict[str, Any] | pd.DataFrame,
     **kwargs: Any,
-) -> dict:
-    """Generate an explanation and enrich feature names with human descriptions.
-
-    Parameters
-    ----------
-    transaction_data : dict or pd.DataFrame
-        See explain_transaction() for parameter details.
-    **kwargs : passed through to explain_transaction().
-
-    Returns
-    -------
-    dict same structure as explain_transaction(), but with descriptions
-    populated in each contributor dict.
-    """
+) -> dict[str, Any]:
     result = explain_transaction(transaction_data=transaction_data, **kwargs)
-
-    for c in result["positive_contributors"]:
-        c["description"] = describe_feature(c["feature"]) or c.get("description", "")
-
-    for c in result["negative_contributors"]:
-        c["description"] = describe_feature(c["feature"]) or c.get("description", "")
-
+    for contributor in (
+        result["positive_contributors"] + result["negative_contributors"]
+    ):
+        contributor["description"] = (
+            describe_feature(contributor["feature"])
+            or contributor.get("description", "")
+        )
     return result

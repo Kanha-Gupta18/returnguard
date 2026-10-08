@@ -49,27 +49,33 @@ The FastAPI service runs at `http://127.0.0.1:8000`.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Check whether the API is running |
-| `POST` | `/predict` | Run prediction, decision, and explanation for one transaction |
+| `GET` | `/health/live` | Confirm the API process is running |
+| `GET` | `/health/ready` | Confirm the validated model runtime is ready |
+| `GET` | `/api/v1/meta` | Read API, build, model, and feature-contract versions |
+| `POST` | `/api/v1/predict` | Run prediction, decision, and explanation for one transaction |
 
-All prediction fields are optional at the schema level. Any omitted model feature defaults to `0.0` during inference.
+The versioned prediction contract accepts four readable transaction fields and an
+optional `advanced_features` object. ReturnGuard derives the amount transform,
+high-value flag, and customer deviation on the server. Unknown fields and invalid
+ranges return a stable validation error with a request ID. The original `/health`
+and `/predict` routes remain available for compatibility while clients migrate.
 
 Example request:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/predict \
+curl -X POST http://127.0.0.1:8000/api/v1/predict \
   -H "Content-Type: application/json" \
   -d '{
-    "TransactionAmt_raw": 250,
-    "TransactionAmt_log1p": 5.525453,
+    "transaction_amount": 250,
     "hour_of_day": 14,
     "day_of_week": 3,
-    "is_high_value": 0,
-    "txn_deviation_from_customer_avg": 100,
-    "V_V29": 0,
-    "V_V37": 0,
-    "V_V30": 0,
-    "V_V35": 0
+    "customer_average_amount": 150,
+    "advanced_features": {
+      "V_V29": 0,
+      "V_V37": 0,
+      "V_V30": 0,
+      "V_V35": 0
+    }
   }'
 ```
 
@@ -86,18 +92,18 @@ Example response from the current model:
     "escalate": 203.5257
   },
   "top_risk_factors": [
-    { "feature": "card5", "contribution": 0.14552001655101776 },
-    { "feature": "card3", "contribution": 0.09616728127002716 },
-    { "feature": "card6", "contribution": 0.06344247609376907 },
+    { "feature": "addr2", "contribution": 0.11733308434486389 },
     { "feature": "R_emaildomain", "contribution": 0.10783710330724716 },
-    { "feature": "addr2", "contribution": 0.11733308434486389 }
+    { "feature": "card6", "contribution": 0.06344247609376907 },
+    { "feature": "TransactionAmt_raw", "contribution": 0.061950042843818665 },
+    { "feature": "addr1", "contribution": 0.04664389789104462 }
   ],
   "top_protective_factors": [
+    { "feature": "card5", "contribution": 0.14552001655101776 },
+    { "feature": "card3", "contribution": 0.09616728127002716 },
     { "feature": "txn_deviation_from_customer_avg", "contribution": 0.05732698738574982 },
     { "feature": "dist1", "contribution": 0.03738522529602051 },
-    { "feature": "V_V19", "contribution": 0.027608856558799744 },
-    { "feature": "addr1", "contribution": 0.04664389789104462 },
-    { "feature": "TransactionAmt_raw", "contribution": 0.061950042843818665 }
+    { "feature": "P_emaildomain", "contribution": 0.02612416446208954 }
   ],
   "transaction_amount": 250.0
 }
@@ -153,7 +159,8 @@ Run this command from the repository root:
 python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Confirm the service is available at `http://127.0.0.1:8000/health`.
+Confirm liveness at `http://127.0.0.1:8000/health/live` and model readiness at
+`http://127.0.0.1:8000/health/ready`.
 
 ### 5. Start the dashboard
 
@@ -177,7 +184,9 @@ documented in `.env.example`.
 - ✅ Feature engineering pipeline with target leakage removed
 - ✅ Cost-sensitive decision engine
 - ✅ Perturbation-based explanation layer
-- ✅ FastAPI backend with `/health` and `/predict`
+- ✅ Versioned FastAPI contract with liveness, readiness, metadata, and prediction endpoints
+- ✅ Validated model checksum and feature contract at startup
+- ✅ Structured request logs, request IDs, rate limiting, and bounded prediction concurrency
 - ✅ React dashboard with transaction input and prediction results
 - ✅ Git repository initialized
 

@@ -1,335 +1,300 @@
-"""Inference module for ReturnGuard.
-
-Connects the existing trained XGBoost model, decision engine,
-and perturbation-based explainability layer.
-
-Loads the model artifact once (singleton/lazy) and does NOT retrain.
-Does NOT load merged.csv or features.csv.
-"""
+"""Model loading and the complete ReturnGuard prediction pipeline."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# Ensure repo root is on path so `decision_engine` and `explainability`
-# imports work regardless of the cwd when `api.main` is imported.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from api.settings import MODEL_PATH
-
-# Import decision engine components at module level so they're always available
-from decision_engine.decide import decide as _decide_func
-from decision_engine.cost_model import expected_loss_approve, expected_loss_review, expected_loss_reject
-from decision_engine.config import DEFAULT_COST_MATRIX, DEFAULT_RISK_THRESHOLDS
-
+import hashlib
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from importlib.metadata import version as package_version
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
+import joblib
 import numpy as np
+from pydantic import BaseModel
 
-# Logging setup
+from api.schemas import ExpectedCosts, ModelFeatureInput, RiskFactor
+from api.settings import settings
+from decision_engine.config import DEFAULT_COST_MATRIX, DEFAULT_RISK_THRESHOLDS
+from decision_engine.decide import decide
+
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Singleton / lazy loader for the XGBoost model artifact
-# ------------------------------------------------------------------
 
-_ARTIFACT_PATH = MODEL_PATH
-_artifact: Optional[Any] = None
-_clf: Optional[Any] = None
-_feature_cols: Optional[List[str]] = None
-_n_features: Optional[int] = None
+@dataclass(frozen=True)
+class RuntimeBundle:
+    artifact: dict[str, Any]
+    model: Any
+    feature_cols: list[str]
+    reference_values: dict[str, float]
+    metadata: dict[str, Any]
 
 
-def _load_artifact() -> None:
-    """Load the XGBoost model artifact once (lazy initialization)."""
-    global _artifact, _clf, _feature_cols, _n_features
+_bundle: RuntimeBundle | None = None
+_load_error_code: str | None = None
 
-    if _artifact is not None:
-        return  # already loaded
 
-    import joblib as _joblib
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as file_handle:
+            value = json.load(file_handle)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"{label}_missing") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label}_invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label}_invalid")
+    return value
+
+
+def _build_runtime_bundle(
+    model_path: Path,
+    explanation_reference_path: Path,
+    model_metadata_path: Path,
+) -> RuntimeBundle:
+    if not model_path.is_file():
+        raise RuntimeError("model_artifact_missing")
+
+    metadata = _read_json(model_metadata_path, "model_metadata")
+    reference_payload = _read_json(
+        explanation_reference_path,
+        "explanation_reference",
+    )
+    artifact_sha256 = _sha256(model_path)
+
+    if metadata.get("artifact_sha256") != artifact_sha256:
+        raise RuntimeError("model_checksum_mismatch")
+    if reference_payload.get("model_sha256") != artifact_sha256:
+        raise RuntimeError("explanation_reference_model_mismatch")
+
+    installed_xgboost = package_version("xgboost")
+    if metadata.get("framework_version") != installed_xgboost:
+        raise RuntimeError("model_framework_version_mismatch")
 
     try:
-        _artifact = _joblib.load(_ARTIFACT_PATH)
-        _clf = _artifact["model"]
-        # Full feature column list as stored in the artifact (includes customer_id).
-        # Remove customer_id so the column count matches TransactionInput (48 features).
-        all_feature_cols = list(_artifact["feature_cols"])
-        _feature_cols = [c for c in all_feature_cols if c != "customer_id"]
-        _n_features = len(_feature_cols)
-        logger.info(
-            "XGBoost model artifact loaded: %d features (including customer_id)",
-            _n_features,
+        artifact = joblib.load(model_path)
+        model = artifact["model"]
+        feature_cols = [
+            name
+            for name in artifact["feature_cols"]
+            if name != "customer_id"
+        ]
+        reference_values = {
+            name: float(value)
+            for name, value in reference_payload["medians"].items()
+        }
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise RuntimeError("model_artifact_invalid") from exc
+
+    if len(feature_cols) != metadata.get("feature_count"):
+        raise RuntimeError("model_feature_count_mismatch")
+    if set(feature_cols) != set(reference_values):
+        raise RuntimeError("explanation_reference_feature_mismatch")
+    if getattr(model, "n_features_in_", len(feature_cols)) != len(feature_cols):
+        raise RuntimeError("model_input_shape_mismatch")
+
+    return RuntimeBundle(
+        artifact=artifact,
+        model=model,
+        feature_cols=feature_cols,
+        reference_values=reference_values,
+        metadata={**metadata, "artifact_sha256": artifact_sha256},
+    )
+
+
+def load_runtime(
+    *,
+    model_path: Path | None = None,
+    explanation_reference_path: Path | None = None,
+    model_metadata_path: Path | None = None,
+    force: bool = False,
+) -> None:
+    """Load and validate every artifact required for prediction."""
+    global _bundle, _load_error_code
+
+    if _bundle is not None and not force:
+        return
+
+    try:
+        candidate = _build_runtime_bundle(
+            model_path or settings.model_path,
+            explanation_reference_path or settings.explanation_reference_path,
+            model_metadata_path or settings.model_metadata_path,
         )
-    except Exception as exc:  # pragma: no cover
-        logger.error("Failed to load model artifact from %s: %s", _ARTIFACT_PATH, exc)
-        _clf = None
-        _feature_cols = []
-        _n_features = 0
+    except RuntimeError as exc:
+        _bundle = None
+        _load_error_code = str(exc)
+        logger.exception("ReturnGuard runtime validation failed")
+        raise
+
+    _bundle = candidate
+    _load_error_code = None
+    logger.info(
+        "ReturnGuard runtime loaded",
+        extra={
+            "model_id": candidate.metadata["model_id"],
+            "feature_count": len(candidate.feature_cols),
+        },
+    )
 
 
-# -----------------------------------------------------------------#
-# Feature row preparation (uses the explainer's existing logic)
-# # -----------------------------------------------------------------#
+# Preserve the established private loader name for existing callers.
+def _load_artifact() -> None:
+    load_runtime()
 
 
-def _transaction_input_to_row_dict(
-    input_data: "TransactionInput",
-) -> dict:
-    """Convert a TransactionInput Pydantic model to a feature dict.
-
-    Missing features default to 0.0. Column ordering follows the model's
-    expected feature names.
-
-    This function mirrors the preparation logic in
-    explainability.explainer._prepare_transaction_row so that the
-    explainability module can work with the same feature space.
-    """
-    from pydantic import BaseModel
-
-    # Ensure the model artifact is loaded
-    _load_artifact()
-
-    if _clf is None or _feature_cols is None:
-        raise RuntimeError("Model artifact could not be loaded")
-
-    # Build a dict with exactly the columns the model expects.
-    # Pydantic fields that don't map to a model column are ignored;
-    # missing model columns default to 0.0.
-    row_dict: dict = {}
-    for col in _feature_cols:
-        # Get the value from the input; default to 0.0 if None/missing
-        val = getattr(input_data, col, None)
-        if val is None:
-            val = 0.0
-        # Ensure numeric
-        try:
-            row_dict[col] = float(val)
-        except (TypeError, ValueError):
-            row_dict[col] = 0.0
-
-    return row_dict
+def reset_runtime() -> None:
+    global _bundle, _load_error_code
+    _bundle = None
+    _load_error_code = None
 
 
-# -----------------------------------------------------------------#
-# Core prediction pipeline
-# # -----------------------------------------------------------------#
+def runtime_status() -> dict[str, Any]:
+    if _bundle is None:
+        return {
+            "ready": False,
+            "error_code": _load_error_code or "runtime_not_loaded",
+        }
+    return {
+        "ready": True,
+        "error_code": None,
+        "model_id": _bundle.metadata["model_id"],
+        "feature_count": len(_bundle.feature_cols),
+    }
 
 
-def predict_fraud_probability(
-    input_data: "TransactionInput",
-) -> float:
-    """Run the XGBoost model and return the fraud probability.
+def runtime_metadata() -> dict[str, Any]:
+    if _bundle is None:
+        raise RuntimeError("runtime_not_ready")
+    return dict(_bundle.metadata)
 
-    Parameters
-    ----------
-    input_data : TransactionInput
-        Transaction features (all optional; missing → 0.0).
 
-    Returns
-    -------
-    float
-        Predicted probability of fraud in [0, 1].
-    """
-    from api.schemas import TransactionInput as _TI
+def get_explanation_context() -> tuple[Any, list[str], dict[str, float]]:
+    if _bundle is None:
+        load_runtime()
+    if _bundle is None:  # pragma: no cover - defensive after load_runtime
+        raise RuntimeError("runtime_not_ready")
+    return (
+        _bundle.model,
+        list(_bundle.feature_cols),
+        dict(_bundle.reference_values),
+    )
 
-    if not isinstance(input_data, _TI):
-        raise TypeError("input_data must be a TransactionInput instance")
 
-    _load_artifact()
+def _require_bundle() -> RuntimeBundle:
+    if _bundle is None:
+        load_runtime()
+    if _bundle is None:  # pragma: no cover - defensive after load_runtime
+        raise RuntimeError("runtime_not_ready")
+    return _bundle
 
-    if _clf is None:
-        raise RuntimeError("Model artifact could not be loaded")
 
-    # --- Prepare feature row ---
-    row_dict = _transaction_input_to_row_dict(input_data)
-    row_array = np.array([row_dict[_feature_cols[i]] for i in range(_n_features)]).reshape(1, -1)
+def _transaction_input_to_row_dict(input_data: BaseModel) -> dict[str, float]:
+    bundle = _require_bundle()
+    if not isinstance(input_data, BaseModel):
+        raise TypeError("input_data must be a Pydantic model")
 
-    # The model's predict_proba returns shape (1, 2); class 1 = fraud
-    prob = float(_clf.predict_proba(row_array)[:, 1][0])
+    row: dict[str, float] = {}
+    for name in bundle.feature_cols:
+        value = getattr(input_data, name, None)
+        row[name] = 0.0 if value is None else float(value)
+    return row
 
-    # Clip to [0, 1] for safety
-    return max(0.0, min(1.0, prob))
+
+def predict_fraud_probability(input_data: ModelFeatureInput) -> float:
+    bundle = _require_bundle()
+    row = _transaction_input_to_row_dict(input_data)
+    row_array = np.array(
+        [[row[name] for name in bundle.feature_cols]],
+        dtype=float,
+    )
+    probability = float(bundle.model.predict_proba(row_array)[:, 1][0])
+    return max(0.0, min(1.0, probability))
 
 
 def run_decision_engine(
     fraud_prob: float,
     transaction_amount: float,
     cost_matrix: Any = None,
-    risk_thresholds: dict = None,
-) -> dict:
-    """Run the decision engine and return the decision result.
-
-    Parameters
-    ----------
-    fraud_prob : float
-        XGBoost predicted fraud probability in [0, 1].
-    transaction_amount : float
-        Transaction amount in currency units.
-    cost_matrix : CostMatrix, optional
-        Override cost matrix. Uses DEFAULT_COST_MATRIX if None.
-    risk_thresholds : dict, optional
-        Override risk band thresholds. Uses DEFAULT_RISK_THRESHOLDS if None.
-
-    Returns
-    -------
-    dict
-        Decision engine output dict with risk_score, risk_band,
-        recommended_action, expected costs, etc.
-    """
-    from decision_engine.decide import decide
-    from decision_engine.config import DEFAULT_COST_MATRIX, DEFAULT_RISK_THRESHOLDS
-
-    if cost_matrix is None:
-        cost_matrix = DEFAULT_COST_MATRIX
-    if risk_thresholds is None:
-        risk_thresholds = DEFAULT_RISK_THRESHOLDS
-
-    result = decide(
+    risk_thresholds: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    return decide(
         fraud_prob=fraud_prob,
+        transaction_amount=transaction_amount,
+        cost_matrix=cost_matrix or DEFAULT_COST_MATRIX,
+        risk_thresholds=risk_thresholds or DEFAULT_RISK_THRESHOLDS,
+    )
+
+
+def run_explainability(
+    input_data: ModelFeatureInput,
+    fraud_prob: float,
+) -> dict[str, Any]:
+    bundle = _require_bundle()
+    row = _transaction_input_to_row_dict(input_data)
+
+    from explainability.explainer import explain_with_descriptions
+
+    return explain_with_descriptions(
+        transaction_data=row,
+        fraud_prob=fraud_prob,
+        model=bundle.model,
+        feature_cols=bundle.feature_cols,
+        reference_values=bundle.reference_values,
+    )
+
+
+def _risk_factors(
+    contributors: Sequence[Mapping[str, Any]],
+) -> list[RiskFactor]:
+    return [
+        RiskFactor(
+            feature=str(contributor["feature"]),
+            contribution=abs(float(contributor["contribution"])),
+        )
+        for contributor in contributors[:5]
+    ]
+
+
+def predict_transaction(
+    input_data: ModelFeatureInput,
+    cost_matrix: Any = None,
+    risk_thresholds: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    fraud_probability = predict_fraud_probability(input_data)
+    transaction_amount = float(input_data.TransactionAmt_raw or 0.0)
+    decision = run_decision_engine(
+        fraud_prob=fraud_probability,
         transaction_amount=transaction_amount,
         cost_matrix=cost_matrix,
         risk_thresholds=risk_thresholds,
     )
+    explanation = run_explainability(input_data, fraud_probability)
 
-    return result
-
-
-def run_explainability(
-    input_data: "TransactionInput",
-    fraud_prob: float,
-) -> dict:
-    """Run perturbation-based explainability and return contributor dicts.
-
-    Parameters
-    ----------
-    input_data : TransactionInput
-        Transaction features (all optional; missing → 0.0).
-    fraud_prob : float
-        Current fraud probability from the model.
-
-    Returns
-    -------
-    dict
-        Explanation dict with positive_contributors and negative_contributors,
-        each a list of dicts with keys: feature, original_value,
-        reference_value, contribution, direction, description.
-    """
-    from api.inference import _transaction_input_to_row_dict  # local import to avoid circular
-
-    # Ensure model is loaded
-    _load_artifact()
-
-    if _clf is None:
-        return {"positive_contributors": [], "negative_contributors": []}
-
-    # Prepare the transaction row dict (same format used by the explainer)
-    row_dict = _transaction_input_to_row_dict(input_data)
-
-    from explainability.explainer import explain_with_descriptions
-
-    try:
-        expl_result = explain_with_descriptions(
-            transaction_data=row_dict,
-            fraud_prob=fraud_prob,
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Explainability module failed: %s", exc)
-        return {"positive_contributors": [], "negative_contributors": []}
-
-    return expl_result
-
-
-# -----------------------------------------------------------------#
-# Unified prediction endpoint logic (FastAPI-independent)
-# # -----------------------------------------------------------------#
-
-
-def predict_transaction(
-    input_data: "TransactionInput",
-    cost_matrix: Any = None,
-    risk_thresholds: dict = None,
-) -> Dict[str, Any]:
-    """Run a single transaction through the full ReturnGuard pipeline.
-
-    Pipeline:
-      1. XGBoost model → fraud probability
-      2. Decision engine → risk band, recommended action, expected costs
-      3. Explainability → top risk and protective factors
-      4. Unified dict compatible with PredictionResponse
-
-    Parameters
-    ----------
-    input_data : TransactionInput
-        Transaction features (all optional; missing → 0.0).
-    cost_matrix : CostMatrix, optional
-        Override cost matrix. Uses DEFAULT_COST_MATRIX if None.
-    risk_thresholds : dict, optional
-        Override risk band thresholds. Uses DEFAULT_RISK_THRESHOLDS if None.
-
-    Returns
-    -------
-    dict
-        Unified prediction result with keys:
-        - risk_score: float
-        - risk_band: str ("LOW"|"MEDIUM"|"HIGH")
-        - recommended_action: str ("APPROVE"|"HUMAN_REVIEW"|"ESCALATE")
-        - expected_costs: dict with "approve", "review", "escalate"
-        - top_risk_factors: list of {feature, contribution}
-        - top_protective_factors: list of {feature, contribution}
-        - transaction_amount: float
-    """
-    from api.schemas import ExpectedCosts, RiskFactor  # local import
-
-    # Step 1: Fraud probability
-    fraud_prob = predict_fraud_probability(input_data)
-
-    # Step 2: Transaction amount from input (TransactionAmt_raw if provided,
-    # otherwise derive from available features or 0.0)
-    txn_amount = float(getattr(input_data, "TransactionAmt_raw", 0.0) or 0.0)
-
-    # Step 3: Decision engine
-    decision_result = run_decision_engine(
-        fraud_prob=fraud_prob,
-        transaction_amount=txn_amount,
-        cost_matrix=cost_matrix,
-        risk_thresholds=risk_thresholds,
+    expected_costs = ExpectedCosts(
+        approve=decision["expected_loss_if_approved"],
+        review=decision["expected_loss_if_reviewed"],
+        escalate=decision["expected_loss_if_rejected"],
     )
-
-    # Step 4: Explanation
-    expl_result = run_explainability(input_data, fraud_prob)
-
-    # Map positive contributors (risk-increasing) → top_risk_factors
-    positive_contributors = expl_result.get("positive_contributors", [])[:5]
-    top_risk_factors: List[RiskFactor] = [
-        RiskFactor(feature=c["feature"], contribution=abs(float(c["contribution"])))
-        for c in positive_contributors
-    ]
-
-    # Map negative contributors (risk-decreasing) → top_protective_factors
-    negative_contributors = expl_result.get("negative_contributors", [])[:5]
-    top_protective_factors: List[RiskFactor] = [
-        RiskFactor(feature=c["feature"], contribution=abs(float(c["contribution"])))
-        for c in negative_contributors
-    ]
-
-    # Step 5: Construct unified response dict
-    unified = {
-        "risk_score": decision_result["risk_score"],
-        "risk_band": decision_result["risk_band"],
-        "recommended_action": decision_result["recommended_action"],
-        "expected_costs": {
-            "approve": decision_result["expected_loss_if_approved"],
-            "review": decision_result["expected_loss_if_reviewed"],
-            "escalate": decision_result["expected_loss_if_rejected"],
-        },
-        "top_risk_factors": top_risk_factors,
-        "top_protective_factors": top_protective_factors,
-        "transaction_amount": txn_amount,
+    return {
+        "risk_score": decision["risk_score"],
+        "risk_band": decision["risk_band"],
+        "recommended_action": decision["recommended_action"],
+        "expected_costs": expected_costs,
+        "top_risk_factors": _risk_factors(
+            explanation.get("positive_contributors", [])
+        ),
+        "top_protective_factors": _risk_factors(
+            explanation.get("negative_contributors", [])
+        ),
+        "transaction_amount": transaction_amount,
     }
-
-    return unified

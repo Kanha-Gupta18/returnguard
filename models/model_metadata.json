@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "model_id": "returnguard-xgboost-ieee-cis-v1",
+  "artifact_sha256": "adc853b67fb3829820999c9cd77314c9167f81c75e25e7e634f532b5ed0cd98b",
+  "framework": "xgboost",
+  "framework_version": "3.4.1",
+  "feature_contract_version": "1.0",
+  "feature_count": 48,
+  "decision_policy_version": "1.0",
+  "training_split": "temporal 60/20/20",
+  "approximate_metrics": {
+    "validation_f1": 0.30,
+    "test_f1": 0.17,
+    "validation_roc_auc": 0.81,
+    "test_roc_auc": 0.76
+  }
+}

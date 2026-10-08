@@ -1,89 +1,17 @@
-"""Pydantic schemas for the ReturnGuard API request/response."""
+"""Pydantic v2 request and response schemas for ReturnGuard."""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import math
+from typing import Literal
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+RiskBand = Literal["LOW", "MEDIUM", "HIGH"]
+RecommendedAction = Literal["APPROVE", "HUMAN_REVIEW", "ESCALATE"]
 
-# ------------------------------------------------------------------
-# Transaction input: one field per model feature (48 features, excluding customer_id)
-# ------------------------------------------------------------------
-
-class TransactionInput(BaseModel):
-    """Input transaction features for the XGBoost model.
-
-    All fields are optional; missing values default to 0.0
-    at inference time. Column names must match the trained model's
-    feature column names exactly.
-    """
-
-    # Transaction amount features
-    TransactionAmt_raw: Optional[float] = None
-    TransactionAmt_log1p: Optional[float] = None
-
-    # Time features
-    hour_of_day: Optional[float] = None
-    day_of_week: Optional[float] = None
-
-    # Derivative features
-    is_high_value: Optional[float] = None
-    txn_deviation_from_customer_avg: Optional[float] = None
-
-    # Card features (6)
-    card1: Optional[float] = None
-    card2: Optional[float] = None
-    card3: Optional[float] = None
-    card4: Optional[float] = None
-    card5: Optional[float] = None
-    card6: Optional[float] = None
-
-    # Address features (2)
-    addr1: Optional[float] = None
-    addr2: Optional[float] = None
-
-    # Distance features (2)
-    dist1: Optional[float] = None
-    dist2: Optional[float] = None
-
-    # Email domain features (2) - cat.coded integers
-    P_emaildomain: Optional[float] = None
-    R_emaildomain: Optional[float] = None
-
-    # V features (V_V12 through V_V41 = 30 features)
-    V_V12: Optional[float] = None
-    V_V13: Optional[float] = None
-    V_V14: Optional[float] = None
-    V_V15: Optional[float] = None
-    V_V16: Optional[float] = None
-    V_V17: Optional[float] = None
-    V_V18: Optional[float] = None
-    V_V19: Optional[float] = None
-    V_V20: Optional[float] = None
-    V_V21: Optional[float] = None
-    V_V22: Optional[float] = None
-    V_V23: Optional[float] = None
-    V_V24: Optional[float] = None
-    V_V25: Optional[float] = None
-    V_V26: Optional[float] = None
-    V_V27: Optional[float] = None
-    V_V28: Optional[float] = None
-    V_V29: Optional[float] = None
-    V_V30: Optional[float] = None
-    V_V31: Optional[float] = None
-    V_V32: Optional[float] = None
-    V_V33: Optional[float] = None
-    V_V34: Optional[float] = None
-    V_V35: Optional[float] = None
-    V_V36: Optional[float] = None
-    V_V37: Optional[float] = None
-    V_V38: Optional[float] = None
-    V_V39: Optional[float] = None
-    V_V40: Optional[float] = None
-    V_V41: Optional[float] = None
-
-    @validator(
+ADVANCED_FEATURE_NAMES = frozenset(
+    [
         "card1",
         "card2",
         "card3",
@@ -96,74 +24,196 @@ class TransactionInput(BaseModel):
         "dist2",
         "P_emaildomain",
         "R_emaildomain",
+    ]
+    + [f"V_V{index}" for index in range(12, 42)]
+)
+
+
+class ModelFeatureInput(BaseModel):
+    """Legacy model-aligned input used by the compatibility endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    TransactionAmt_raw: float | None = None
+    TransactionAmt_log1p: float | None = None
+    hour_of_day: float | None = None
+    day_of_week: float | None = None
+    is_high_value: float | None = None
+    txn_deviation_from_customer_avg: float | None = None
+
+    card1: float | None = None
+    card2: float | None = None
+    card3: float | None = None
+    card4: float | None = None
+    card5: float | None = None
+    card6: float | None = None
+    addr1: float | None = None
+    addr2: float | None = None
+    dist1: float | None = None
+    dist2: float | None = None
+    P_emaildomain: float | None = None
+    R_emaildomain: float | None = None
+
+    V_V12: float | None = None
+    V_V13: float | None = None
+    V_V14: float | None = None
+    V_V15: float | None = None
+    V_V16: float | None = None
+    V_V17: float | None = None
+    V_V18: float | None = None
+    V_V19: float | None = None
+    V_V20: float | None = None
+    V_V21: float | None = None
+    V_V22: float | None = None
+    V_V23: float | None = None
+    V_V24: float | None = None
+    V_V25: float | None = None
+    V_V26: float | None = None
+    V_V27: float | None = None
+    V_V28: float | None = None
+    V_V29: float | None = None
+    V_V30: float | None = None
+    V_V31: float | None = None
+    V_V32: float | None = None
+    V_V33: float | None = None
+    V_V34: float | None = None
+    V_V35: float | None = None
+    V_V36: float | None = None
+    V_V37: float | None = None
+    V_V38: float | None = None
+    V_V39: float | None = None
+    V_V40: float | None = None
+    V_V41: float | None = None
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def values_must_be_finite(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Feature values must be finite numbers")
+        return value
+
+
+# Preserve the established import name for internal callers and compatibility.
+TransactionInput = ModelFeatureInput
+
+
+class PredictionRequest(BaseModel):
+    """Small public input contract for the versioned API."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "transaction_amount": 250.0,
+                "hour_of_day": 14,
+                "day_of_week": 3,
+                "customer_average_amount": 150.0,
+                "advanced_features": {"V_V29": 0.0, "V_V37": 0.0},
+            }
+        },
     )
-    def features_must_be_numeric(cls, v):
-        if v is not None and not isinstance(v, (int, float)):
-            raise ValueError("Feature must be numeric")
-        return v
 
+    transaction_amount: float = Field(gt=0, le=10_000_000)
+    hour_of_day: int = Field(ge=0, le=23)
+    day_of_week: int = Field(ge=0, le=6)
+    customer_average_amount: float = Field(ge=0, le=10_000_000)
+    advanced_features: dict[str, float] = Field(default_factory=dict)
 
-# ------------------------------------------------------------------
-# Risk factor entries for top_risk_factors / top_protective_factors
-# ------------------------------------------------------------------
+    @field_validator("transaction_amount", "customer_average_amount")
+    @classmethod
+    def amounts_must_be_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("Amounts must be finite numbers")
+        return value
+
+    @field_validator("advanced_features")
+    @classmethod
+    def validate_advanced_features(
+        cls,
+        value: dict[str, float],
+    ) -> dict[str, float]:
+        unknown = sorted(set(value) - ADVANCED_FEATURE_NAMES)
+        if unknown:
+            raise ValueError(
+                f"Unknown advanced feature(s): {', '.join(unknown)}"
+            )
+        invalid = [
+            name
+            for name, feature_value in value.items()
+            if not math.isfinite(feature_value)
+            or abs(feature_value) > 1_000_000_000
+        ]
+        if invalid:
+            raise ValueError(
+                "Advanced feature values are out of range: "
+                f"{', '.join(sorted(invalid))}"
+            )
+        return value
+
+    def to_model_input(self) -> ModelFeatureInput:
+        amount = self.transaction_amount
+        return ModelFeatureInput(
+            TransactionAmt_raw=amount,
+            TransactionAmt_log1p=math.log1p(amount),
+            hour_of_day=float(self.hour_of_day),
+            day_of_week=float(self.day_of_week),
+            is_high_value=1.0 if amount > 500 else 0.0,
+            txn_deviation_from_customer_avg=(
+                amount - self.customer_average_amount
+            ),
+            **self.advanced_features,
+        )
+
 
 class RiskFactor(BaseModel):
-    """A contributing factor identified by feature name and contribution."""
+    feature: str
+    contribution: float = Field(ge=0)
 
-    feature: str = Field(..., description="Feature name")
-    contribution: float = Field(
-        ..., description="Absolute contribution to probability change"
-    )
-
-
-# ------------------------------------------------------------------
-# Expected costs per action
-# ------------------------------------------------------------------
 
 class ExpectedCosts(BaseModel):
-    """Expected cost for each possible action."""
+    approve: float = Field(ge=0)
+    review: float = Field(ge=0)
+    escalate: float = Field(ge=0)
 
-    approve: float = Field(..., ge=0, description="Expected loss if approved")
-    review: float = Field(..., ge=0, description="Expected loss if reviewed")
-    escalate: float = Field(..., ge=0, description="Expected loss if escalated")
-
-
-# ------------------------------------------------------------------
-# Complete prediction response
-# ------------------------------------------------------------------
 
 class PredictionResponse(BaseModel):
-    """Unified response from the /predict endpoint."""
+    risk_score: float = Field(ge=0, le=1)
+    risk_band: RiskBand
+    recommended_action: RecommendedAction
+    expected_costs: ExpectedCosts
+    top_risk_factors: list[RiskFactor] = Field(default_factory=list)
+    top_protective_factors: list[RiskFactor] = Field(default_factory=list)
+    transaction_amount: float = Field(ge=0)
 
-    risk_score: float = Field(
-        ..., ge=0.0, le=1.0, description="Predicted fraud probability"
-    )
-    risk_band: str = Field(
-        ..., description="Risk band: LOW | MEDIUM | HIGH"
-    )
-    recommended_action: str = Field(
-        ...,
-        description="APPROVE | HUMAN_REVIEW | ESCALATE",
-    )
-    expected_costs: ExpectedCosts = Field(
-        ..., description="Expected costs per action"
-    )
-    top_risk_factors: List[RiskFactor] = Field(
-        default_factory=list,
-        description="Top features increasing fraud probability",
-    )
-    top_protective_factors: List[RiskFactor] = Field(
-        default_factory=list,
-        description="Top features decreasing fraud probability",
-    )
-    transaction_amount: float = Field(
-        ..., ge=0.0, description="Transaction amount in currency units"
-    )
 
-    @validator("recommended_action")
-    def action_must_be_valid(cls, v):
-        if v not in {"APPROVE", "HUMAN_REVIEW", "ESCALATE"}:
-            raise ValueError(
-                "recommended_action must be one of: APPROVE, HUMAN_REVIEW, ESCALATE"
-            )
-        return v
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    model_id: str | None = None
+    feature_count: int | None = None
+
+
+class MetadataResponse(BaseModel):
+    api_version: str
+    build_sha: str
+    model_id: str
+    model_sha256: str
+    model_framework: str
+    model_framework_version: str
+    feature_contract_version: str
+    feature_count: int
+    decision_policy_version: str
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    request_id: str
+    fields: list[dict[str, str]] | None = None
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
