@@ -2,7 +2,7 @@
 
 ReturnGuard helps fraud operations teams turn transaction risk scores into cost-aware, explainable actions for approval, human review, or escalation.
 
-![Python 3](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?logo=fastapi)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -114,7 +114,12 @@ git clone https://github.com/Kanha-Gupta18/returnguard.git
 cd returnguard
 ```
 
-### 2. Create a Python environment and install dependencies
+### 2. Use the supported runtimes
+
+ReturnGuard targets Python 3.12 and Node.js 22. The repository includes
+`.python-version` and `.nvmrc` for compatible version managers.
+
+### 3. Create a Python environment and install dependencies
 
 ```bash
 python -m venv .venv
@@ -133,10 +138,14 @@ source .venv/bin/activate
 Install the backend dependencies:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.lock
 ```
 
-### 3. Start the API
+`requirements.txt` records the direct runtime dependencies. The resolved
+`requirements.lock` is the reproducible install used for development and
+deployment.
+
+### 4. Start the API
 
 Run this command from the repository root:
 
@@ -146,17 +155,21 @@ python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 
 Confirm the service is available at `http://127.0.0.1:8000/health`.
 
-### 4. Start the dashboard
+### 5. Start the dashboard
 
 Open a second terminal:
 
 ```bash
 cd dashboard/frontend
-npm install
+npm ci
 npm run dev
 ```
 
 Open `http://127.0.0.1:5173`. The Vite development server proxies dashboard requests from `/api` to the backend on port 8000.
+
+The model and explanation reference paths are resolved from the repository root,
+so the API can be launched from another working directory. Optional overrides are
+documented in `.env.example`.
 
 ## Current status
 

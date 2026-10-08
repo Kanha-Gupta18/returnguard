@@ -15,22 +15,19 @@ The public API consists of:
 
 from __future__ import annotations
 
+import json
+from typing import Any, Dict, List, Optional
+
 import joblib
 import numpy as np
-import os
-import sys
 import pandas as pd
-from typing import Any, Dict, List, Optional
+
+from api.settings import EXPLANATION_REFERENCE_PATH, MODEL_PATH
 
 from explainability.feature_descriptions import get_description, describe_feature
 
-# Ensure repo root is on path so `models.*` imports work regardless of cwd
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
 # Load the existing XGBoost model artifact
-_ARTIFACT_PATH = "models/xgboost.joblib"
+_ARTIFACT_PATH = MODEL_PATH
 _artifact = joblib.load(_ARTIFACT_PATH)
 _clf = _artifact["model"]
 
@@ -39,31 +36,20 @@ _all_feature_cols = [c for c in _artifact["feature_cols"] if c != "customer_id"]
 _N_FEATURES = len(_all_feature_cols)
 
 # ------------------------------------------------------------------
-# Background sample for reference values (small subset of TRAIN only)
-# ------------------------------------------------------------------
-# Read only the columns the model expects; coerce non-numeric to 0.0.
-_train = pd.read_csv("data/splits/train.csv")
+# Reference values are derived once from the training split and shipped with the
+# inference artifact. Runtime prediction never requires the private/raw dataset.
+with EXPLANATION_REFERENCE_PATH.open(encoding="utf-8") as reference_file:
+    _reference_payload = json.load(reference_file)
 
-# Build background dataset column by column so we don't need full alignment.
-_background_cols = []
-for c in _all_feature_cols:
-    if c in _train.columns:
-        s = pd.to_numeric(_train[c], errors="coerce")
-    else:
-        s = pd.Series([0.0] * len(_train), dtype=float)
-    _background_cols.append(s)
+_reference_values = {
+    feature: float(value)
+    for feature, value in _reference_payload["medians"].items()
+}
 
-_background_df = pd.concat(_background_cols, axis=1)
-# Guarantee the column order matches _all_feature_cols
-_background_df = _background_df[_all_feature_cols]
-# Fill any remaining NaN with 0.0 and convert to float numpy array
-_background_data = _background_df.fillna(0.0).values.astype(float)
-
-# Determine a neutral reference value for each feature from the background sample.
-# For numeric features, use the median of the background sample (robust to outliers).
-_background_medians = np.median(_background_data, axis=0)
-# For binary/boolean-like features (median is 0 or 1), ensure we have a sensible reference.
-_reference_values = {c: float(_background_medians[i]) for i, c in enumerate(_all_feature_cols)}
+if set(_reference_values) != set(_all_feature_cols):
+    raise RuntimeError(
+        "Explanation reference features do not match the model artifact"
+    )
 
 
 # ------------------------------------------------------------------

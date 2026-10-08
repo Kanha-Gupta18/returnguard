@@ -1,13 +1,9 @@
-pandas
-numpy
-scikit-learn
-xgboost
-shap
-fastapi
-uvicorn
-streamlit
-matplotlib
-seaborn
-plotly
-pytest
-python-dotenv
+# Runtime dependencies for Python 3.12.
+fastapi==0.141.1
+joblib==1.5.3
+numpy==2.4.2
+pandas==2.3.3
+pydantic==2.13.4
+scikit-learn==1.8.0
+uvicorn==0.52.1
+xgboost==3.4.1

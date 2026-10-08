@@ -9,7 +9,6 @@ Does NOT load merged.csv or features.csv.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -18,6 +17,8 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from api.settings import MODEL_PATH
 
 # Import decision engine components at module level so they're always available
 from decision_engine.decide import decide as _decide_func
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Singleton / lazy loader for the XGBoost model artifact
 # ------------------------------------------------------------------
 
-_ARTIFACT_PATH = "models/xgboost.joblib"
+_ARTIFACT_PATH = MODEL_PATH
 _artifact: Optional[Any] = None
 _clf: Optional[Any] = None
 _feature_cols: Optional[List[str]] = None

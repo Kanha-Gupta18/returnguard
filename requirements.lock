@@ -1,0 +1,26 @@
+# Fully resolved Python 3.12 runtime set.
+# Regenerate deliberately when requirements.txt changes.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+click==8.5.0
+fastapi==0.141.1
+h11==0.16.0
+idna==3.20
+joblib==1.5.3
+numpy==2.4.2
+pandas==2.3.3
+pydantic==2.13.4
+pydantic-core==2.46.4
+python-dateutil==2.9.0.post0
+pytz==2026.5
+scikit-learn==1.8.0
+scipy==1.18.1
+six==1.17.0
+starlette==1.7.0
+threadpoolctl==3.7.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.5
+uvicorn==0.52.1
+xgboost==3.4.1
